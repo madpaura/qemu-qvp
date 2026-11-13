@@ -85,6 +85,14 @@ config MAX78000FTHR
     depends on TCG && ARM
     select MAX78000_SOC
 
+config QVP
+    bool
+    default y
+    depends on TCG && ARM
+    select ARM_GIC
+    select CPU_CLUSTER
+    select UNIMP
+
 config MPS3R
     bool
     default y
