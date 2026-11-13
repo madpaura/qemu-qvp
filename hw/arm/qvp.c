@@ -8,6 +8,16 @@
  * Each core lives in its own CPU cluster so that it is a separate
  * inferior for gdb and has its own TB cache.
  *
+ * Usage:
+ *   qemu-system-arm -M qvp[,boot-core=N][,gdb-port=P] -accel tcg,thread=multi
+ *     -device loader,file=core0.elf,cpu-num=0 ...   (0 aux .. 4 fcore0)
+ *
+ * gdb-port=P starts one gdb server per core (core n on port P+n). A stop
+ * on one core (breakpoint, step, Ctrl-C) freezes only that core; the
+ * rest of the SoC keeps running. Don't combine with -s/-gdb.
+ * Monitor (also via gdb "monitor ..."):
+ *   qvp-core start|hold|reset|pause|resume|status [core|all]
+ *
  * Internal use only, not intended for upstream.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -25,6 +35,7 @@
 #include "hw/cpu/cluster.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/misc/unimp.h"
+#include "exec/gdbstub.h"
 #include "monitor/hmp.h"
 #include "monitor/monitor.h"
 #include "qobject/qdict.h"
@@ -119,6 +130,7 @@ struct QVPMachineState {
     MemoryRegion pmu;
 
     uint32_t boot_core;
+    uint32_t gdb_port;
 };
 
 static void qvp_create_core(QVPMachineState *s, int i, MemoryRegion *sysmem)
@@ -456,6 +468,17 @@ static void qvp_init(MachineState *ms)
 
     monitor_register_hmp("qvp-core", false, hmp_qvp_core);
 
+    /* One gdb server per core: core i listens on gdb-port + i */
+    for (int i = 0; s->gdb_port && i < QVP_NUM_CORES; i++) {
+        g_autofree char *dev = g_strdup_printf("tcp::%u", s->gdb_port + i);
+
+        if (!gdbserver_start_core(CPU(&s->cpu[i]), dev, &error_fatal)) {
+            exit(1);
+        }
+        info_report("qvp: core %d (%s) gdb server on port %u", i,
+                    qvp_cores[i].name, s->gdb_port + i);
+    }
+
     for (int i = 0; i < ARRAY_SIZE(qvp_global); i++) {
         const QVPRegion *r = &qvp_global[i];
 
@@ -479,6 +502,14 @@ static void qvp_instance_init(Object *obj)
     object_property_set_description(obj, "boot-core",
                                     "Core running out of reset (0..4, "
                                     "default 1 = mgmt); others are held");
+
+    s->gdb_port = 0;
+    object_property_add_uint32_ptr(obj, "gdb-port", &s->gdb_port,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_set_description(obj, "gdb-port",
+                                    "Start a gdb server per core, core n "
+                                    "on TCP port gdb-port + n (0 = off). "
+                                    "Do not combine with -s/-gdb");
 }
 
 static void qvp_class_init(ObjectClass *oc, const void *data)
