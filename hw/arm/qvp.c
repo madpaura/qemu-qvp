@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qapi/error.h"
 #include "system/address-spaces.h"
 #include "hw/core/boards.h"
@@ -24,7 +25,13 @@
 #include "hw/cpu/cluster.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/misc/unimp.h"
+#include "monitor/hmp.h"
+#include "monitor/monitor.h"
+#include "qobject/qdict.h"
+#include "system/cpus.h"
+#include "target/arm/arm-powerctl.h"
 #include "target/arm/cpu.h"
+#include "target/arm/internals.h"
 
 #define QVP_NUM_CORES       5
 #define QVP_NUM_IRQ         256
@@ -37,6 +44,19 @@
 
 #define QVP_GIC_DIST        0x00400000
 #define QVP_GIC_CPU         0x00401000
+
+/*
+ * PMU stub. Placeholder core-control registers until the real
+ * eldora_pmu register spec is modelled; everything else is LOG_UNIMP.
+ *   CORE_RELEASE  W1: release core n from reset   R: cores out of reset
+ *   CORE_HOLD     W1: put core n back into reset  R: cores held in reset
+ *   CORE_RESET    W1: pulse reset on running core n
+ */
+#define QVP_PMU_BASE        0x00D03000
+#define QVP_PMU_SIZE        0x1000
+#define QVP_PMU_CORE_RELEASE 0x000
+#define QVP_PMU_CORE_HOLD    0x004
+#define QVP_PMU_CORE_RESET   0x008
 
 typedef struct QVPCoreInfo {
     const char *name;
@@ -70,7 +90,6 @@ static const QVPRegion qvp_global[] = {
     { "secure_buffer_sram", 0x00CB8000, 0x0000B000, true },
     { "ckg",                0x00D00000, 0x00001000, false },
     { "gpio",               0x00D01000, 0x00001000, false },
-    { "pmu",                0x00D03000, 0x00001000, false },
     { "ext_timer",          0x00D04000, 0x00009000, false },
     { "snor",               0x00D0D000, 0x00001000, false },
     { "smbus",              0x00D11000, 0x00001000, false },
@@ -97,6 +116,7 @@ struct QVPMachineState {
     MemoryRegion qcc[QVP_NUM_CORES];
     MemoryRegion global_ram[ARRAY_SIZE(qvp_global)];
     GICState gic;
+    MemoryRegion pmu;
 
     uint32_t boot_core;
 };
@@ -148,6 +168,9 @@ static void qvp_create_core(QVPMachineState *s, int i, MemoryRegion *sysmem)
 
     object_initialize_child(OBJECT(&s->cluster[i]), "cpu", &s->cpu[i],
                             ms->cpu_type);
+    /* MPIDR.Aff0 = core id; also the id used by arm-powerctl */
+    object_property_set_int(OBJECT(&s->cpu[i]), "mp-affinity", i,
+                            &error_abort);
     object_property_set_link(OBJECT(&s->cpu[i]), "memory",
                              OBJECT(&s->cpu_mem[i]), &error_abort);
     /* Non-boot cores are held until software releases them */
@@ -183,6 +206,234 @@ static void qvp_create_gic(QVPMachineState *s, MemoryRegion *sysmem)
     }
 }
 
+/* Core control, shared by the PMU stub and the monitor */
+
+typedef enum QVPCoreOp {
+    QVP_CORE_START,
+    QVP_CORE_HOLD,
+    QVP_CORE_RESET,
+    QVP_CORE_PAUSE,
+    QVP_CORE_RESUME,
+} QVPCoreOp;
+
+static bool qvp_core_in_reset(QVPMachineState *s, int i)
+{
+    return s->cpu[i].power_state == PSCI_OFF;
+}
+
+/*
+ * A reset pulse on a running core: cpu_reset() alone would put a
+ * non-boot core back into its "held" power-on state, so come back on.
+ */
+static void qvp_core_reset_work(CPUState *cs, run_on_cpu_data data)
+{
+    cpu_reset(cs);
+    cs->halted = 0;
+    arm_set_cpu_power_state(ARM_CPU(cs), PSCI_ON);
+}
+
+static const char *qvp_core_op(QVPMachineState *s, int i, QVPCoreOp op)
+{
+    CPUState *cs = CPU(&s->cpu[i]);
+    int ret = QEMU_ARM_POWERCTL_RET_SUCCESS;
+
+    switch (op) {
+    case QVP_CORE_START:
+        ret = arm_set_cpu_on_and_reset(i);
+        break;
+    case QVP_CORE_HOLD:
+        ret = arm_set_cpu_off(i);
+        break;
+    case QVP_CORE_RESET:
+        if (qvp_core_in_reset(s, i)) {
+            return "held in reset";
+        }
+        async_run_on_cpu(cs, qvp_core_reset_work, RUN_ON_CPU_NULL);
+        break;
+    case QVP_CORE_PAUSE:
+        if (qatomic_read(&cs->frozen)) {
+            return "already paused";
+        }
+        cpu_freeze(cs);
+        break;
+    case QVP_CORE_RESUME:
+        if (!qatomic_read(&cs->frozen)) {
+            return "not paused";
+        }
+        cpu_thaw(cs);
+        break;
+    }
+
+    switch (ret) {
+    case QEMU_ARM_POWERCTL_RET_SUCCESS:
+        return NULL;
+    case QEMU_ARM_POWERCTL_ALREADY_ON:
+        return "already out of reset";
+    case QEMU_ARM_POWERCTL_ON_PENDING:
+        return "release already pending";
+    case QEMU_ARM_POWERCTL_IS_OFF:
+        return "held in reset";
+    default:
+        return "failed";
+    }
+}
+
+static uint64_t qvp_pmu_read(void *opaque, hwaddr addr, unsigned size)
+{
+    QVPMachineState *s = opaque;
+    uint32_t out_of_reset = 0;
+
+    for (int i = 0; i < QVP_NUM_CORES; i++) {
+        if (!qvp_core_in_reset(s, i)) {
+            out_of_reset |= BIT(i);
+        }
+    }
+
+    switch (addr) {
+    case QVP_PMU_CORE_RELEASE:
+        return out_of_reset;
+    case QVP_PMU_CORE_HOLD:
+        return ~out_of_reset & MAKE_64BIT_MASK(0, QVP_NUM_CORES);
+    case QVP_PMU_CORE_RESET:
+        return 0;
+    default:
+        qemu_log_mask(LOG_UNIMP, "qvp-pmu: unimplemented read @0x%"
+                      HWADDR_PRIx "\n", addr);
+        return 0;
+    }
+}
+
+static void qvp_pmu_write(void *opaque, hwaddr addr, uint64_t val,
+                          unsigned size)
+{
+    QVPMachineState *s = opaque;
+    QVPCoreOp op;
+
+    switch (addr) {
+    case QVP_PMU_CORE_RELEASE:
+        op = QVP_CORE_START;
+        break;
+    case QVP_PMU_CORE_HOLD:
+        op = QVP_CORE_HOLD;
+        break;
+    case QVP_PMU_CORE_RESET:
+        op = QVP_CORE_RESET;
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP, "qvp-pmu: unimplemented write @0x%"
+                      HWADDR_PRIx " = 0x%" PRIx64 "\n", addr, val);
+        return;
+    }
+
+    for (int i = 0; i < QVP_NUM_CORES; i++) {
+        if (val & BIT(i)) {
+            const char *err = qvp_core_op(s, i, op);
+
+            if (err) {
+                qemu_log_mask(LOG_GUEST_ERROR, "qvp-pmu: core %d (%s): %s\n",
+                              i, qvp_cores[i].name, err);
+            }
+        }
+    }
+}
+
+static const MemoryRegionOps qvp_pmu_ops = {
+    .read = qvp_pmu_read,
+    .write = qvp_pmu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+static int qvp_parse_core(const char *arg)
+{
+    for (int i = 0; i < QVP_NUM_CORES; i++) {
+        if (!strcmp(arg, qvp_cores[i].name)) {
+            return i;
+        }
+    }
+    if (arg[0] >= '0' && arg[0] < '0' + QVP_NUM_CORES && !arg[1]) {
+        return arg[0] - '0';
+    }
+    return -1;
+}
+
+static void qvp_core_status(MonitorHMP *hmp, QVPMachineState *s, int i)
+{
+    ARMCPU *cpu = &s->cpu[i];
+    const char *state;
+
+    switch (cpu->power_state) {
+    case PSCI_ON:
+        state = "running";
+        break;
+    case PSCI_OFF:
+        state = "held";
+        break;
+    default:
+        state = "releasing";
+        break;
+    }
+    monitor_hmp_printf(hmp, "  core %d %-7s %-9s %-6s pc=0x%08x\n", i,
+                       qvp_cores[i].name, state,
+                       qatomic_read(&CPU(cpu)->frozen) ? "paused" : "",
+                       cpu->env.regs[15]);
+}
+
+static void hmp_qvp_core(MonitorHMP *hmp, const QDict *qdict)
+{
+    static const char * const ops[] = {
+        [QVP_CORE_START] = "start",
+        [QVP_CORE_HOLD] = "hold",
+        [QVP_CORE_RESET] = "reset",
+        [QVP_CORE_PAUSE] = "pause",
+        [QVP_CORE_RESUME] = "resume",
+    };
+    QVPMachineState *s = QVP_MACHINE(qdev_get_machine());
+    const char *action = qdict_get_str(qdict, "action");
+    const char *core = qdict_get_try_str(qdict, "core");
+    int first = 0, last = QVP_NUM_CORES - 1;
+    int op = -1;
+
+    if (core && strcmp(core, "all")) {
+        first = last = qvp_parse_core(core);
+        if (first < 0) {
+            monitor_hmp_printf(hmp, "unknown core '%s'\n", core);
+            return;
+        }
+    } else if (!core && strcmp(action, "status")) {
+        monitor_hmp_printf(hmp, "qvp-core %s needs a core (or 'all')\n",
+                           action);
+        return;
+    }
+
+    if (!strcmp(action, "status")) {
+        for (int i = first; i <= last; i++) {
+            qvp_core_status(hmp, s, i);
+        }
+        return;
+    }
+
+    for (int i = 0; i < ARRAY_SIZE(ops); i++) {
+        if (!strcmp(action, ops[i])) {
+            op = i;
+        }
+    }
+    if (op < 0) {
+        monitor_hmp_printf(hmp, "unknown action '%s'\n", action);
+        return;
+    }
+
+    for (int i = first; i <= last; i++) {
+        const char *err = qvp_core_op(s, i, op);
+
+        if (err) {
+            monitor_hmp_printf(hmp, "core %d (%s): %s\n", i,
+                               qvp_cores[i].name, err);
+        }
+    }
+}
+
 static void qvp_init(MachineState *ms)
 {
     QVPMachineState *s = QVP_MACHINE(ms);
@@ -198,6 +449,12 @@ static void qvp_init(MachineState *ms)
     }
 
     qvp_create_gic(s, sysmem);
+
+    memory_region_init_io(&s->pmu, OBJECT(s), &qvp_pmu_ops, s, "pmu",
+                          QVP_PMU_SIZE);
+    memory_region_add_subregion(sysmem, QVP_PMU_BASE, &s->pmu);
+
+    monitor_register_hmp("qvp-core", false, hmp_qvp_core);
 
     for (int i = 0; i < ARRAY_SIZE(qvp_global); i++) {
         const QVPRegion *r = &qvp_global[i];
