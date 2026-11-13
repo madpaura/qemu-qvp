@@ -92,10 +92,21 @@ typedef struct GDBState {
      * Must be set off after sending the stop reply itself.
      */
     bool allow_stop_reply;
+    /*
+     * System mode only: when set, this is a per-core server that only
+     * shows, stops and resumes this one vCPU (see gdbserver_start_core).
+     */
+    CPUState *bound_cpu;
 } GDBState;
 
-/* lives in main gdbstub.c */
-extern GDBState gdbserver_state;
+/*
+ * lives in main gdbstub.c. gdbserver_state is the instance currently
+ * being serviced: the default -gdb server, or a per-core server while
+ * one of its events is handled (always under the BQL).
+ */
+extern GDBState *gdbserver_cur;
+#define gdbserver_state (*gdbserver_cur)
+extern GDBState gdbserver_default_state;
 
 /*
  * Inline utility function, convert from int to hex and back
@@ -169,6 +180,9 @@ int gdb_get_char(void); /* user only */
  * gdb_continue() - handle continue in mode specific way.
  */
 void gdb_continue(void);
+bool gdb_target_running(void);
+void gdb_target_interrupt(void);
+void gdb_core_release(void);
 
 /**
  * gdb_continue_partial() - handle partial continue in mode specific way.

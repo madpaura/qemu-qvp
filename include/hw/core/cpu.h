@@ -506,6 +506,9 @@ struct CPUState {
     bool created;
     bool stop;
     bool stopped;
+    bool frozen;
+    /* owned by a per-core gdb server: gdb breakpoints are per-vCPU */
+    bool gdb_core_bound;
 
     bool start_powered_off;
 
@@ -924,6 +927,23 @@ bool qemu_cpu_is_self(CPUState *cpu);
  * can do that, the target vCPU thread will try not to take the BQL.
  */
 void qemu_cpu_kick(CPUState *cpu);
+
+/**
+ * cpu_freeze:
+ * @cpu: The vCPU to freeze.
+ *
+ * Stop executing guest code on @cpu only, keeping all of its state, while
+ * the rest of the machine keeps running. On return @cpu is no longer
+ * executing (unless called from @cpu's own thread, in which case it stops
+ * at the next exit from the execution loop). Must be called with the BQL.
+ */
+void cpu_freeze(CPUState *cpu);
+
+/**
+ * cpu_thaw:
+ * @cpu: The vCPU to let run again after cpu_freeze().
+ */
+void cpu_thaw(CPUState *cpu);
 
 /**
  * cpu_is_stopped:

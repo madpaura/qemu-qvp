@@ -1869,6 +1869,22 @@ SRST
   List event channels in the guest
 ERST
 
+    {
+        .name       = "qvp-core",
+        .args_type  = "action:s,core:s?",
+        .params     = "start|hold|reset|pause|resume|status [core|all]",
+        .help       = "qvp board: control one core (registered by -M qvp)",
+    },
+
+SRST
+``qvp-core`` *action* [*core*]
+  qvp board only. *core* is a number (0-4), a name (aux, mgmt, pf0,
+  pf1, fcore0) or ``all`` (default for ``status``).
+  ``start`` releases a core from reset, ``hold`` puts it back into reset,
+  ``reset`` pulses reset on a running core, ``pause``/``resume`` stop and
+  continue it in place while the rest of the SoC keeps running.
+ERST
+
 HXCOMM *** MUST BE LAST ENTRY **
     {
         .name       = "info",

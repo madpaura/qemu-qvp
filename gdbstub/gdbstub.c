@@ -56,7 +56,8 @@ typedef struct GDBRegisterState {
     const GDBFeature *feature;
 } GDBRegisterState;
 
-GDBState gdbserver_state;
+GDBState gdbserver_default_state;
+GDBState *gdbserver_cur = &gdbserver_default_state;
 
 void gdb_init_gdbserver_state(void)
 {
@@ -242,6 +243,9 @@ static CPUState *find_cpu(uint32_t thread_id)
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
+        if (gdbserver_state.bound_cpu && cpu != gdbserver_state.bound_cpu) {
+            continue;
+        }
         if (gdb_get_cpu_index(cpu) == thread_id) {
             return cpu;
         }
@@ -285,7 +289,9 @@ static CPUState *gdb_next_attached_cpu(CPUState *cpu)
     cpu = CPU_NEXT(cpu);
 
     while (cpu) {
-        if (gdb_get_cpu_process(cpu)->attached) {
+        GDBProcess *process = gdb_get_cpu_process(cpu);
+
+        if (process && process->attached) {
             break;
         }
 
@@ -301,7 +307,7 @@ CPUState *gdb_first_attached_cpu(void)
     CPUState *cpu = first_cpu;
     GDBProcess *process = gdb_get_cpu_process(cpu);
 
-    if (!process->attached) {
+    if (!process || !process->attached) {
         return gdb_next_attached_cpu(cpu);
     }
 
@@ -822,7 +828,7 @@ static int gdb_handle_vcont(const char *p)
         case GDB_ALL_THREADS:
             process = gdb_get_process(pid);
 
-            if (!process->attached) {
+            if (!process || !process->attached) {
                 return -EINVAL;
             }
 
@@ -1031,6 +1037,12 @@ static void handle_detach(GArray *params, void *user_ctx)
 
         pid = gdb_get_cmd_param(params, 0)->val_ul;
     }
+#ifndef CONFIG_USER_ONLY
+    else if (gdbserver_state.bound_cpu) {
+        /* a per-core server's only process is not necessarily pid 1 */
+        pid = gdbserver_state.processes[0].pid;
+    }
+#endif
 
 #ifdef CONFIG_USER_ONLY
     if (gdb_handle_detach_user(pid)) {
@@ -1039,6 +1051,10 @@ static void handle_detach(GArray *params, void *user_ctx)
 #endif
 
     process = gdb_get_process(pid);
+    if (!process) {
+        gdb_put_packet("E22");
+        return;
+    }
     gdb_process_breakpoint_remove_all(process);
     process->attached = false;
 
@@ -1455,6 +1471,14 @@ static void handle_v_attach(GArray *params, void *user_ctx)
 
 static void handle_v_kill(GArray *params, void *user_ctx)
 {
+#ifndef CONFIG_USER_ONLY
+    if (gdbserver_state.bound_cpu) {
+        /* Killing one core's session must not take the whole SoC down */
+        gdb_put_packet("OK");
+        gdb_core_release();
+        return;
+    }
+#endif
     /* Kill the target */
     gdb_put_packet("OK");
     error_report("QEMU: Terminated via GDBstub");
@@ -2118,6 +2142,12 @@ static int gdb_handle_packet(const char *line_buf)
         }
         break;
     case 'k':
+#ifndef CONFIG_USER_ONLY
+        if (gdbserver_state.bound_cpu) {
+            gdb_core_release();
+            break;
+        }
+#endif
         /* Kill the target */
         error_report("QEMU: Terminated via GDBstub");
         gdb_exit(0);
@@ -2317,7 +2347,7 @@ void gdb_set_stop_cpu(CPUState *cpu)
 {
     GDBProcess *p = gdb_get_cpu_process(cpu);
 
-    if (!p->attached) {
+    if (!p || !p->attached) {
         /*
          * Having a stop CPU corresponding to a process that is not attached
          * confuses GDB. So we ignore the request.
@@ -2354,7 +2384,7 @@ void gdb_read_byte(uint8_t ch)
         if (ch != '$')
             return;
     }
-    if (runstate_is_running()) {
+    if (gdb_target_running()) {
         /*
          * When the CPU is running, we cannot do anything except stop
          * it when receiving a char. This is expected on a Ctrl-C in the
@@ -2367,7 +2397,7 @@ void gdb_read_byte(uint8_t ch)
         } else {
             gdbserver_state.allow_stop_reply = true;
         }
-        vm_stop(RUN_STATE_PAUSED);
+        gdb_target_interrupt();
     } else
 #endif
     {

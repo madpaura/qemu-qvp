@@ -60,6 +60,30 @@ void gdb_unregister_coprocessor_all(CPUState *cpu);
 bool gdbserver_start(const char *port_or_device, Error **errp);
 
 /**
+ * gdbserver_start_core: start a gdb server for a single vCPU
+ * @cpu: the only vCPU this server shows and controls
+ * @device: chardev spec, e.g. "tcp::1234"
+ * @errp: error handle
+ *
+ * System emulation only. Unlike the -gdb server, stopping (breakpoint,
+ * step, Ctrl-C) freezes only @cpu while the rest of the machine keeps
+ * running, and breakpoints/watchpoints apply only to @cpu. Several of
+ * these can run side by side, one per vCPU. Do not combine with -gdb.
+ *
+ * Returns true when server successfully started.
+ */
+bool gdbserver_start_core(CPUState *cpu, const char *device, Error **errp);
+
+/**
+ * gdb_core_handle_debug: route a debug stop to a per-core gdb server
+ * @cpu: the vCPU that took a debug exception (called on its own thread)
+ *
+ * Returns true if @cpu is owned by a gdbserver_start_core() server and
+ * the stop has been handled (the vCPU is frozen and gdb notified).
+ */
+bool gdb_core_handle_debug(CPUState *cpu);
+
+/**
  * gdb_feature_builder_init() - Initialize GDBFeatureBuilder.
  * @builder: The builder to be initialized.
  * @feature: The feature to be filled.
