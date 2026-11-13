@@ -91,6 +91,7 @@ config QVP
     depends on TCG && ARM
     select ARM_GIC
     select CPU_CLUSTER
+    select PL011
     select UNIMP
 
 config MPS3R

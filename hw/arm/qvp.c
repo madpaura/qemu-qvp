@@ -9,12 +9,14 @@
  * inferior for gdb and has its own TB cache.
  *
  * Usage:
- *   qemu-system-arm -M qvp[,boot-core=N][,gdb-port=P] -accel tcg,thread=multi
+ *   qemu-system-arm -M qvp[,boot-core=N][,gdb-port=P][,start-paused=on] -accel tcg,thread=multi
  *     -device loader,file=core0.elf,cpu-num=0 ...   (0 aux .. 4 fcore0)
  *
  * gdb-port=P starts one gdb server per core (core n on port P+n). A stop
  * on one core (breakpoint, step, Ctrl-C) freezes only that core; the
  * rest of the SoC keeps running. Don't combine with -s/-gdb.
+ * start-paused=on pauses every core before its first instruction.
+ * Console: PL011 at 0xD12000 (GIC INTID 32) on -serial / -nographic.
  * Monitor (also via gdb "monitor ..."):
  *   qvp-core start|hold|reset|pause|resume|status [core|all]
  *
@@ -33,6 +35,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "hw/cpu/cluster.h"
+#include "hw/char/pl011.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/misc/unimp.h"
 #include "exec/gdbstub.h"
@@ -40,6 +43,7 @@
 #include "monitor/monitor.h"
 #include "qobject/qdict.h"
 #include "system/cpus.h"
+#include "system/system.h"
 #include "target/arm/arm-powerctl.h"
 #include "target/arm/cpu.h"
 #include "target/arm/internals.h"
@@ -55,6 +59,17 @@
 
 #define QVP_GIC_DIST        0x00400000
 #define QVP_GIC_CPU         0x00401000
+
+/*
+ * UART: a PL011 stands in for elan_uart until its register spec is
+ * modelled. It decodes the first 4K of the 8K window.
+ */
+#define QVP_UART_BASE       0x00D12000
+#define QVP_UART_SIZE       0x2000
+#define QVP_PL011_SIZE      0x1000
+
+/* GIC SPI numbers (INTID = 32 + SPI); placeholders until the real map */
+#define QVP_SPI_UART        0
 
 /*
  * PMU stub. Placeholder core-control registers until the real
@@ -104,7 +119,6 @@ static const QVPRegion qvp_global[] = {
     { "ext_timer",          0x00D04000, 0x00009000, false },
     { "snor",               0x00D0D000, 0x00001000, false },
     { "smbus",              0x00D11000, 0x00001000, false },
-    { "uart",               0x00D12000, 0x00002000, false },
     { "intd",               0x00D80000, 0x00002000, false },
     { "gaudicdma",          0x00DA8000, 0x00006000, true },
     { "gdma",               0x00EB0000, 0x00010000, false },
@@ -131,6 +145,7 @@ struct QVPMachineState {
 
     uint32_t boot_core;
     uint32_t gdb_port;
+    bool start_paused;
 };
 
 static void qvp_create_core(QVPMachineState *s, int i, MemoryRegion *sysmem)
@@ -458,9 +473,17 @@ static void qvp_init(MachineState *ms)
 
     for (int i = 0; i < QVP_NUM_CORES; i++) {
         qvp_create_core(s, i, sysmem);
+        /* vCPUs have not run yet, so this needs no cpu_freeze() handshake */
+        CPU(&s->cpu[i])->frozen = s->start_paused;
     }
 
     qvp_create_gic(s, sysmem);
+
+    pl011_create(QVP_UART_BASE,
+                 qdev_get_gpio_in(DEVICE(&s->gic), QVP_SPI_UART),
+                 serial_hd(0));
+    create_unimplemented_device("uart-hi", QVP_UART_BASE + QVP_PL011_SIZE,
+                                QVP_UART_SIZE - QVP_PL011_SIZE);
 
     memory_region_init_io(&s->pmu, OBJECT(s), &qvp_pmu_ops, s, "pmu",
                           QVP_PMU_SIZE);
@@ -492,6 +515,16 @@ static void qvp_init(MachineState *ms)
     }
 }
 
+static bool qvp_get_start_paused(Object *obj, Error **errp)
+{
+    return QVP_MACHINE(obj)->start_paused;
+}
+
+static void qvp_set_start_paused(Object *obj, bool value, Error **errp)
+{
+    QVP_MACHINE(obj)->start_paused = value;
+}
+
 static void qvp_instance_init(Object *obj)
 {
     QVPMachineState *s = QVP_MACHINE(obj);
@@ -510,6 +543,13 @@ static void qvp_instance_init(Object *obj)
                                     "Start a gdb server per core, core n "
                                     "on TCP port gdb-port + n (0 = off). "
                                     "Do not combine with -s/-gdb");
+
+    object_property_add_bool(obj, "start-paused", qvp_get_start_paused,
+                             qvp_set_start_paused);
+    object_property_set_description(obj, "start-paused",
+                                    "Every core starts paused at its reset "
+                                    "vector; resume it from its gdb or with "
+                                    "qvp-core resume");
 }
 
 static void qvp_class_init(ObjectClass *oc, const void *data)
