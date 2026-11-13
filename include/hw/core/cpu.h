@@ -507,6 +507,8 @@ struct CPUState {
     bool stop;
     bool stopped;
     bool frozen;
+    /* owned by a per-core gdb server: gdb breakpoints are per-vCPU */
+    bool gdb_core_bound;
 
     bool start_powered_off;
 

@@ -39,7 +39,54 @@ typedef struct {
     Chardev *mon_chr;
 } GDBSystemState;
 
-GDBSystemState gdbserver_system_state;
+static GDBSystemState gdbserver_default_system_state;
+static GDBSystemState *gdbserver_system_cur = &gdbserver_default_system_state;
+#define gdbserver_system_state (*gdbserver_system_cur)
+
+/*
+ * Per-core servers (gdbserver_start_core). Each has its own protocol
+ * and chardev state; gdb_core_enter() makes it the current instance
+ * for the duration of an event. Everything runs under the BQL.
+ */
+typedef struct GDBCoreServer {
+    GDBState state;
+    GDBSystemState sys;
+} GDBCoreServer;
+
+static GPtrArray *gdb_core_servers;
+
+typedef struct GDBContext {
+    GDBState *state;
+    GDBSystemState *sys;
+} GDBContext;
+
+static GDBContext gdb_core_enter(GDBCoreServer *srv)
+{
+    GDBContext saved = { gdbserver_cur, gdbserver_system_cur };
+
+    g_assert(bql_locked());
+    gdbserver_cur = &srv->state;
+    gdbserver_system_cur = &srv->sys;
+    return saved;
+}
+
+static void gdb_core_leave(GDBContext saved)
+{
+    gdbserver_cur = saved.state;
+    gdbserver_system_cur = saved.sys;
+}
+
+static GDBCoreServer *gdb_core_find(CPUState *cpu)
+{
+    for (int i = 0; gdb_core_servers && i < gdb_core_servers->len; i++) {
+        GDBCoreServer *srv = g_ptr_array_index(gdb_core_servers, i);
+
+        if (srv->state.bound_cpu == cpu) {
+            return srv;
+        }
+    }
+    return NULL;
+}
 
 static void reset_gdbserver_state(void)
 {
@@ -230,8 +277,29 @@ static void gdb_sigterm_handler(int signal)
 static int gdb_chr_write(Chardev *chr, const uint8_t *buf, int len)
 {
     g_autoptr(GString) hex_buf = g_string_new("O");
+    GDBCoreServer *owner = NULL;
+    GDBContext saved;
+
+    for (int i = 0; gdb_core_servers && i < gdb_core_servers->len; i++) {
+        GDBCoreServer *srv = g_ptr_array_index(gdb_core_servers, i);
+
+        if (srv->sys.mon_chr == chr) {
+            owner = srv;
+        }
+    }
+    if (owner) {
+        saved = gdb_core_enter(owner);
+    } else if (!gdbserver_default_state.init) {
+        return len;
+    } else {
+        saved = (GDBContext) { gdbserver_cur, gdbserver_system_cur };
+        gdbserver_cur = &gdbserver_default_state;
+        gdbserver_system_cur = &gdbserver_default_system_state;
+    }
+
     gdb_memtohex(hex_buf, buf, len);
     gdb_put_packet(hex_buf->str);
+    gdb_core_leave(saved);
     return len;
 }
 
@@ -417,6 +485,169 @@ bool gdbserver_start(const char *device, Error **errp)
     return true;
 }
 
+/*
+ * Per-core gdb servers
+ */
+
+bool gdb_target_running(void)
+{
+    if (gdbserver_state.bound_cpu) {
+        return !qatomic_read(&gdbserver_state.bound_cpu->frozen);
+    }
+    return runstate_is_running();
+}
+
+void gdb_target_interrupt(void)
+{
+    if (gdbserver_state.bound_cpu) {
+        cpu_freeze(gdbserver_state.bound_cpu);
+        gdb_vm_state_change(NULL, false, RUN_STATE_PAUSED);
+        return;
+    }
+    vm_stop(RUN_STATE_PAUSED);
+}
+
+/* Session over (detach, kill, disconnect): let the core run free */
+void gdb_core_release(void)
+{
+    CPUState *cpu = gdbserver_state.bound_cpu;
+
+    gdb_breakpoint_remove_all(cpu);
+    cpu_single_step(cpu, 0);
+    gdbserver_state.processes[0].attached = false;
+    gdbserver_state.c_cpu = NULL;
+    gdbserver_state.g_cpu = NULL;
+    gdbserver_state.allow_stop_reply = false;
+    if (qatomic_read(&cpu->frozen)) {
+        cpu_thaw(cpu);
+    }
+}
+
+bool gdb_core_handle_debug(CPUState *cpu)
+{
+    GDBCoreServer *srv = gdb_core_find(cpu);
+    GDBContext saved;
+
+    if (!srv) {
+        return false;
+    }
+
+    saved = gdb_core_enter(srv);
+    if (gdbserver_state.c_cpu) {
+        cpu_freeze(cpu);
+        gdb_vm_state_change(NULL, false, RUN_STATE_DEBUG);
+    } else {
+        /* Nobody attached (any more): don't hold the core */
+        cpu_single_step(cpu, 0);
+    }
+    gdb_core_leave(saved);
+    return true;
+}
+
+static int gdb_core_chr_can_receive(void *opaque)
+{
+    return MAX_PACKET_LENGTH;
+}
+
+static void gdb_core_chr_receive(void *opaque, const uint8_t *buf, int size)
+{
+    GDBContext saved = gdb_core_enter(opaque);
+
+    for (int i = 0; i < size; i++) {
+        gdb_read_byte(buf[i]);
+    }
+    gdb_core_leave(saved);
+}
+
+static void gdb_core_chr_event(void *opaque, QEMUChrEvent event)
+{
+    GDBContext saved = gdb_core_enter(opaque);
+    CPUState *cpu = gdbserver_state.bound_cpu;
+
+    switch (event) {
+    case CHR_EVENT_OPENED:
+        gdbserver_state.processes[0].attached = true;
+        gdbserver_state.c_cpu = cpu;
+        gdbserver_state.g_cpu = cpu;
+        g_byte_array_set_size(gdbserver_state.last_packet, 0);
+        gdbserver_state.state = RS_IDLE;
+        /* gdb expects the target to be stopped when it connects */
+        if (!qatomic_read(&cpu->frozen)) {
+            cpu_freeze(cpu);
+        }
+        break;
+    case CHR_EVENT_CLOSED:
+        gdb_core_release();
+        break;
+    default:
+        break;
+    }
+    gdb_core_leave(saved);
+}
+
+bool gdbserver_start_core(CPUState *cpu, const char *device, Error **errp)
+{
+    g_autoptr(GString) cs = g_string_new(device);
+    g_autofree char *label = g_strdup_printf("gdb-core%d", cpu->cpu_index);
+    GDBCoreServer *srv;
+    GDBContext saved;
+    GDBProcess *process;
+    Chardev *chr, *mon_chr = NULL;
+
+    if (!accel_supports_guest_debug(current_accel())) {
+        error_setg(errp, "gdbstub: current accelerator doesn't "
+                   "support guest debugging");
+        return false;
+    }
+    if (gdb_core_find(cpu)) {
+        error_setg(errp, "gdbstub: CPU %d already has a gdb server",
+                   cpu->cpu_index);
+        return false;
+    }
+    if (g_str_has_prefix(cs->str, "tcp:")) {
+        g_string_append_printf(cs, ",wait=off,nodelay=on,server=on");
+    }
+    chr = qemu_chr_new_noreplay(label, cs->str, false, NULL);
+    if (!chr) {
+        error_setg(errp, "gdbstub: couldn't create chardev '%s'", device);
+        return false;
+    }
+
+    srv = g_new0(GDBCoreServer, 1);
+    saved = gdb_core_enter(srv);
+
+    gdb_init_gdbserver_state();
+    gdbserver_state.bound_cpu = cpu;
+    gdbserver_state.processes = g_new0(GDBProcess, 1);
+    gdbserver_state.process_num = 1;
+    process = &gdbserver_state.processes[0];
+    process->pid = cpu->cluster_index == UNASSIGNED_CLUSTER_INDEX ?
+                   1 : cpu->cluster_index + 1;
+
+#ifdef CONFIG_HMP
+    /* "monitor ..." from this gdb */
+    mon_chr = qemu_chardev_new(NULL, TYPE_CHARDEV_GDB, NULL, NULL,
+                               &error_abort);
+    monitor_new_hmp(NULL, mon_chr->label, false, &error_abort);
+#endif
+    gdbserver_system_state.mon_chr = mon_chr;
+
+    qemu_chr_fe_init(&gdbserver_system_state.chr, chr, &error_abort);
+    qemu_chr_fe_set_handlers(&gdbserver_system_state.chr,
+                             gdb_core_chr_can_receive, gdb_core_chr_receive,
+                             gdb_core_chr_event, NULL, srv, NULL, true);
+    gdbserver_state.state = RS_IDLE;
+
+    gdb_core_leave(saved);
+
+    cpu->gdb_core_bound = true;
+    if (!gdb_core_servers) {
+        gdb_core_servers = g_ptr_array_new();
+    }
+    g_ptr_array_add(gdb_core_servers, srv);
+    return true;
+}
+
 static void register_types(void)
 {
     type_register_static(&char_gdb_type_info);
@@ -549,6 +780,11 @@ void gdb_handle_query_attached(GArray *params, void *ctx)
 
 void gdb_continue(void)
 {
+    if (gdbserver_state.bound_cpu) {
+        trace_gdbstub_op_continue_cpu(gdbserver_state.bound_cpu->cpu_index);
+        cpu_thaw(gdbserver_state.bound_cpu);
+        return;
+    }
     if (!runstate_needs_reset()) {
         trace_gdbstub_op_continue();
         vm_start();
@@ -563,6 +799,24 @@ int gdb_continue_partial(char *newstates)
     CPUState *cpu;
     int res = 0;
     int flag = 0;
+
+    if (gdbserver_state.bound_cpu) {
+        cpu = gdbserver_state.bound_cpu;
+        switch (newstates[cpu->cpu_index]) {
+        case 's':
+            trace_gdbstub_op_stepping(cpu->cpu_index);
+            cpu_single_step(cpu, gdbserver_state.sstep_flags);
+            /* fall through */
+        case 'c':
+            cpu_thaw(cpu);
+            return 0;
+        case 0:
+        case 1:
+            return 0;
+        default:
+            return -1;
+        }
+    }
 
     if (!runstate_needs_reset()) {
         bool step_requested = false;

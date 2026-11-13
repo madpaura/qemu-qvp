@@ -295,7 +295,7 @@ void cpu_handle_guest_debug(CPUState *cpu)
         } else {
             cpu_single_step(cpu, 0);
         }
-    } else {
+    } else if (!gdb_core_handle_debug(cpu)) {
         gdb_set_stop_cpu(cpu);
         qemu_system_debug_request();
         cpu->stopped = true;
