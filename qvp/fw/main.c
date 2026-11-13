@@ -7,8 +7,10 @@
  *   phase 1: mgmt sends an SGI to each core (GICD_SGIR target list)
  *   phase 2: SPI 48+n is targeted at core n (GICD_ITARGETSR) and pended
  *   phase 3: every core sends an SGI to the next one (ring)
- * Afterwards the UART RX interrupt (INTID 32, routed to mgmt) echoes
- * whatever is typed on the console.
+ * Every core has its own UART (its own console/terminal). Before coming
+ * up each core loops one byte back through it, which must raise the UART
+ * interrupt (PPI 16) on that core only. Afterwards each core echoes what
+ * is typed on its console.
  *
  * Internal test firmware for -M qvp, not for upstream.
  */
@@ -25,46 +27,12 @@
 static volatile char rx_buf[64];
 static volatile uint32_t rx_head, rx_tail;
 
-static inline uint32_t irq_save(void)
-{
-    uint32_t flags;
-
-    __asm__ volatile("mrs %0, cpsr\n\tcpsid i" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static inline void irq_restore(uint32_t flags)
-{
-    __asm__ volatile("msr cpsr_c, %0" :: "r"(flags) : "memory");
-}
-
 static inline uint32_t read_mpidr(void)
 {
     uint32_t v;
 
     __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(v));
     return v;
-}
-
-static void spin_lock(volatile uint32_t *lock)
-{
-    uint32_t tmp;
-
-    __asm__ volatile(
-        "1: ldrex   %0, [%1]\n"
-        "   cmp     %0, #0\n"
-        "   bne     1b\n"
-        "   strex   %0, %2, [%1]\n"
-        "   cmp     %0, #0\n"
-        "   bne     1b\n"
-        "   dmb\n"
-        : "=&r"(tmp) : "r"(lock), "r"(1) : "cc", "memory");
-}
-
-static void spin_unlock(volatile uint32_t *lock)
-{
-    __asm__ volatile("dmb" ::: "memory");
-    *lock = 0;
 }
 
 /* Console */
@@ -77,13 +45,6 @@ static void uart_putc(char c)
     while (UART_FR & UART_FR_TXFF) {
     }
     UART_DR = c;
-}
-
-static void uart_puts(const char *s)
-{
-    while (*s) {
-        uart_putc(*s++);
-    }
 }
 
 static void put_num(uint32_t v, unsigned base, int width, char pad)
@@ -149,28 +110,22 @@ static void vprint(const char *fmt, va_list ap)
     }
 }
 
-/* Print one line tagged with this core; lines from cores never interleave */
+/* The UART is this core's own, so no locking against other cores */
 static void cprintf(const char *fmt, ...)
 {
-    uint32_t flags = irq_save();
     va_list ap;
 
-    spin_lock(&SHARED->uart_lock);
-    uart_puts("[");
-    uart_puts(core_name[ME]);
-    uart_puts("] ");
     va_start(ap, fmt);
     vprint(fmt, ap);
     va_end(ap);
-    spin_unlock(&SHARED->uart_lock);
-    irq_restore(flags);
 }
 
 /* GIC */
 
 static void gic_cpu_init(void)
 {
-    GICD_ISENABLER(0) = 0x0000ffff;     /* SGIs, banked per core */
+    /* SGIs and the UART PPI, banked per core */
+    GICD_ISENABLER(0) = 0x0000ffff | (1u << INTID_UART);
     GICC_PMR = 0xf0;
     GICC_CTLR = 1;
     __asm__ volatile("cpsie i" ::: "memory");
@@ -212,6 +167,41 @@ void irq_handler(void)
     GICC_EOIR = iar;
 }
 
+static int wait_nonzero(volatile uint32_t *p);
+
+/*
+ * Loop one byte back through this core's UART: the RX interrupt must
+ * arrive here. Leaves RX interrupts enabled for the console echo.
+ */
+static void uart_init_and_selftest(void)
+{
+    int ok;
+
+    UART_CR = 0x301;                    /* UARTEN | TXE | RXE */
+    UART_IMSC = UART_IMSC_RX;
+    cprintf("UART loopback ");
+    UART_CR = 0x301 | UART_CR_LBE;      /* only this byte loops back */
+    uart_putc('*');
+    ok = wait_nonzero(&SHARED->uart_rx_hits[ME]);
+    UART_CR = 0x301;
+    rx_tail = rx_head;                  /* drop the loopback byte */
+    cprintf(ok ? " interrupt on this core\n" : " no interrupt\n");
+}
+
+static void console_echo(void)
+{
+    for (;;) {
+        __asm__ volatile("wfi");
+        while (rx_tail != rx_head) {
+            char c = rx_buf[rx_tail++ % sizeof(rx_buf)];
+
+            cprintf("rx '%c' (0x%02x), uart irqs on %s: %u\n",
+                    c >= ' ' && c < 127 ? c : '.', (unsigned)c,
+                    core_name[ME], SHARED->uart_rx_hits[ME]);
+        }
+    }
+}
+
 static int wait_nonzero(volatile uint32_t *p)
 {
     for (uint32_t i = 0; i < TIMEOUT; i++) {
@@ -229,7 +219,7 @@ static int check_routing(void)
     int ok = 1;
 
     cprintf("interrupt routing (rows = receiving core)\n");
-    cprintf("          SGIs from: aux mgmt pf0 pf1 fcore0 | SPI 48+n: 0 1 2 3 4\n");
+    cprintf("          SGIs from: aux mgmt pf0 pf1 fcore0 | SPI 48+n: 0 1 2 3 4 | UART\n");
     for (int r = 0; r < NUM_CORES; r++) {
         int row_ok = !SHARED->unexpected[r];
 
@@ -241,14 +231,17 @@ static int check_routing(void)
             row_ok &= SHARED->sgi_hits[r][s] == want_sgi;
             row_ok &= SHARED->spi_hits[r][s] == want_spi;
         }
+        /* exactly one: its own loopback byte */
+        row_ok &= SHARED->uart_rx_hits[r] == 1;
         cprintf("  %6s               %u   %u    %u   %u   %u     |"
-                "           %u %u %u %u %u  %s\n", core_name[r],
+                "           %u %u %u %u %u |   %u   %s\n", core_name[r],
                 SHARED->sgi_hits[r][0], SHARED->sgi_hits[r][1],
                 SHARED->sgi_hits[r][2], SHARED->sgi_hits[r][3],
                 SHARED->sgi_hits[r][4],
                 SHARED->spi_hits[r][0], SHARED->spi_hits[r][1],
                 SHARED->spi_hits[r][2], SHARED->spi_hits[r][3],
-                SHARED->spi_hits[r][4], row_ok ? "ok" : "WRONG");
+                SHARED->spi_hits[r][4], SHARED->uart_rx_hits[r],
+                row_ok ? "ok" : "WRONG");
         ok &= row_ok;
     }
     return ok;
@@ -263,17 +256,15 @@ static void mgmt_main(void)
         p[i] = 0;
     }
 
-    UART_CR = 0x301;                    /* UARTEN | TXE | RXE */
-    UART_IMSC = UART_IMSC_RX;
-
     GICD_CTLR = 1;
     for (int n = 0; n < NUM_CORES; n++) {
         gic_route_spi(INTID_TEST_SPI + n, n);
     }
-    gic_route_spi(INTID_UART, MGMT);
     gic_cpu_init();
 
-    cprintf("qvp stub firmware, MPIDR.Aff0=%u\n", read_mpidr() & 0xff);
+    cprintf("qvp stub firmware, mgmt console, MPIDR.Aff0=%u\n",
+            read_mpidr() & 0xff);
+    uart_init_and_selftest();
     cprintf("releasing aux, pf0, pf1, fcore0 via PMU CORE_RELEASE\n");
     SHARED->ready[ME] = 1;
     PMU_CORE_RELEASE = 0x1d;
@@ -313,21 +304,8 @@ static void mgmt_main(void)
 
     ok &= check_routing();
     cprintf("interrupt routing: %s\n", ok ? "PASS" : "FAIL");
-    cprintf("type on the console: UART RX (INTID %u) is routed to mgmt\n",
-            INTID_UART);
-
-    for (;;) {
-        __asm__ volatile("wfi");
-        while (rx_tail != rx_head) {
-            char c = rx_buf[rx_tail++ % sizeof(rx_buf)];
-
-            cprintf("rx '%c' (0x%02x), uart irqs: mgmt %u, others %u\n",
-                    c >= ' ' && c < 127 ? c : '.', (unsigned)c,
-                    SHARED->uart_rx_hits[MGMT],
-                    SHARED->uart_rx_hits[0] + SHARED->uart_rx_hits[2] +
-                    SHARED->uart_rx_hits[3] + SHARED->uart_rx_hits[4]);
-        }
-    }
+    cprintf("type here: this console's RX interrupt goes to mgmt only\n");
+    console_echo();
 }
 
 static void other_main(void)
@@ -335,18 +313,28 @@ static void other_main(void)
     uint32_t aff0 = read_mpidr() & 0xff;
 
     gic_cpu_init();
-    cprintf("online, MPIDR.Aff0=%u%s\n", aff0,
-            aff0 == ME ? "" : " (expected core id!)");
+    cprintf("qvp stub firmware, %s console, MPIDR.Aff0=%u%s\n",
+            core_name[ME], aff0, aff0 == ME ? "" : " (expected core id!)");
+    uart_init_and_selftest();
+    cprintf("online, waiting for mgmt's interrupt tests\n");
     SHARED->ready[ME] = 1;
 
     while (SHARED->phase < 3) {
         /* mgmt drives phases 1 and 2 */
     }
     send_sgi(SGI_RING, (ME + 1) % NUM_CORES);
-
-    for (;;) {
-        __asm__ volatile("wfi");
+    while (!SHARED->sgi_hits[ME][(ME + NUM_CORES - 1) % NUM_CORES]) {
     }
+    cprintf("received %u SGIs, %u SPIs; results on the mgmt console\n",
+            SHARED->sgi_hits[ME][0] + SHARED->sgi_hits[ME][1] +
+            SHARED->sgi_hits[ME][2] + SHARED->sgi_hits[ME][3] +
+            SHARED->sgi_hits[ME][4],
+            SHARED->spi_hits[ME][0] + SHARED->spi_hits[ME][1] +
+            SHARED->spi_hits[ME][2] + SHARED->spi_hits[ME][3] +
+            SHARED->spi_hits[ME][4]);
+    cprintf("type here: this console's RX interrupt goes to %s only\n",
+            core_name[ME]);
+    console_echo();
 }
 
 int main(void);

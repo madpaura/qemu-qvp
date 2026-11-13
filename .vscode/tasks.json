@@ -31,12 +31,149 @@
             }
         },
         {
+            "label": "qvp: console aux",
+            "type": "shell",
+            "command": "qvp/console.sh aux",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp console",
+                    "endsPattern": "^qvp console"
+                }
+            },
+            "presentation": {
+                "group": "qvp-consoles",
+                "panel": "dedicated",
+                "reveal": "always",
+                "focus": false,
+                "echo": false,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "qvp: console mgmt",
+            "type": "shell",
+            "command": "qvp/console.sh mgmt",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp console",
+                    "endsPattern": "^qvp console"
+                }
+            },
+            "presentation": {
+                "group": "qvp-consoles",
+                "panel": "dedicated",
+                "reveal": "always",
+                "focus": false,
+                "echo": false,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "qvp: console pf0",
+            "type": "shell",
+            "command": "qvp/console.sh pf0",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp console",
+                    "endsPattern": "^qvp console"
+                }
+            },
+            "presentation": {
+                "group": "qvp-consoles",
+                "panel": "dedicated",
+                "reveal": "always",
+                "focus": false,
+                "echo": false,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "qvp: console pf1",
+            "type": "shell",
+            "command": "qvp/console.sh pf1",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp console",
+                    "endsPattern": "^qvp console"
+                }
+            },
+            "presentation": {
+                "group": "qvp-consoles",
+                "panel": "dedicated",
+                "reveal": "always",
+                "focus": false,
+                "echo": false,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "qvp: console fcore0",
+            "type": "shell",
+            "command": "qvp/console.sh fcore0",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp console",
+                    "endsPattern": "^qvp console"
+                }
+            },
+            "presentation": {
+                "group": "qvp-consoles",
+                "panel": "dedicated",
+                "reveal": "always",
+                "focus": false,
+                "echo": false,
+                "showReuseMessage": false
+            }
+        },
+        {
+            "label": "qvp: consoles",
+            "dependsOn": [
+                "qvp: console aux",
+                "qvp: console mgmt",
+                "qvp: console pf0",
+                "qvp: console pf1",
+                "qvp: console fcore0"
+            ],
+            "problemMatcher": []
+        },
+        {
             "label": "qvp: run",
             "type": "shell",
             "command": "qvp/run.sh --gdb",
             "dependsOn": [
                 "qvp: build qemu",
-                "qvp: build fw"
+                "qvp: build fw",
+                "qvp: consoles"
             ],
             "isBackground": true,
             "problemMatcher": {
@@ -46,7 +183,7 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp: monitor on",
+                    "beginsPattern": "^qvp: consoles and logs in",
                     "endsPattern": "\\(fcore0\\) gdb server on port"
                 }
             },
@@ -62,7 +199,8 @@
             "command": "qvp/run.sh --gdb --paused",
             "dependsOn": [
                 "qvp: build qemu",
-                "qvp: build fw"
+                "qvp: build fw",
+                "qvp: consoles"
             ],
             "isBackground": true,
             "problemMatcher": {
@@ -72,7 +210,7 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp: monitor on",
+                    "beginsPattern": "^qvp: consoles and logs in",
                     "endsPattern": "\\(fcore0\\) gdb server on port"
                 }
             },
@@ -85,7 +223,7 @@
         {
             "label": "qvp: monitor",
             "type": "shell",
-            "command": "socat -,raw,echo=0 unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "command": "socat -,raw,echo=0 unix-connect:/tmp/qvp-${env:USER}/monitor.sock",
             "problemMatcher": [],
             "presentation": {
                 "panel": "dedicated",
@@ -95,19 +233,19 @@
         {
             "label": "qvp: status",
             "type": "shell",
-            "command": "echo 'qvp-core status' | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock | tr -d '\\r' | grep '^  core'",
+            "command": "echo 'qvp-core status' | socat - unix-connect:/tmp/qvp-${env:USER}/monitor.sock | tr -d '\\r' | grep '^  core'",
             "problemMatcher": []
         },
         {
             "label": "qvp: resume all cores",
             "type": "shell",
-            "command": "echo 'qvp-core resume all' | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "command": "echo 'qvp-core resume all' | socat - unix-connect:/tmp/qvp-${env:USER}/monitor.sock",
             "problemMatcher": []
         },
         {
             "label": "qvp: stop",
             "type": "shell",
-            "command": "echo quit | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "command": "echo quit | socat - unix-connect:/tmp/qvp-${env:USER}/monitor.sock",
             "problemMatcher": []
         }
     ]

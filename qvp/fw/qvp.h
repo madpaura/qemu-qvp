@@ -30,13 +30,13 @@
 #define GICC_IAR        REG32(GICC_BASE + 0x0C)
 #define GICC_EOIR       REG32(GICC_BASE + 0x10)
 
-/* INTIDs; must match QVP_SPI_* in hw/arm/qvp.c */
-#define INTID_UART      32
+/* INTIDs; must match QVP_PPI_* in hw/arm/qvp.c */
+#define INTID_UART      16      /* PPI: each core's own UART */
 #define INTID_TEST_SPI  48      /* 48 + n is routed to core n by the test */
 #define SGI_FROM_MGMT   1
 #define SGI_RING        2
 
-/* PL011 stand-in for elan_uart */
+/* PL011 stand-in for elan_uart; every core has its own at this address */
 #define UART_BASE       0x00D12000u
 #define UART_DR         REG32(UART_BASE + 0x00)
 #define UART_FR         REG32(UART_BASE + 0x18)
@@ -45,6 +45,7 @@
 #define UART_ICR        REG32(UART_BASE + 0x44)
 #define UART_FR_RXFE    (1u << 4)
 #define UART_FR_TXFF    (1u << 5)
+#define UART_CR_LBE     (1u << 7)                 /* loopback */
 #define UART_IMSC_RX    ((1u << 4) | (1u << 6))   /* RX + RX timeout */
 
 /* PMU stub (placeholder layout, see hw/arm/qvp.c) */
@@ -52,12 +53,11 @@
 
 /* State shared by all cores, in core_sram0 */
 struct shared {
-    volatile uint32_t uart_lock;
     volatile uint32_t phase;
     volatile uint32_t ready[NUM_CORES];
     volatile uint32_t sgi_hits[NUM_CORES][NUM_CORES];  /* [receiver][sender] */
     volatile uint32_t spi_hits[NUM_CORES][NUM_CORES];  /* [receiver][spi n] */
-    volatile uint32_t uart_rx_hits[NUM_CORES];
+    volatile uint32_t uart_rx_hits[NUM_CORES];   /* [receiver] */
     volatile uint32_t unexpected[NUM_CORES];     /* stray INTIDs */
 };
 #define SHARED ((struct shared *)0x00C00000u)
