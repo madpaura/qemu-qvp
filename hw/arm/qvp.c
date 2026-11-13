@@ -1,8 +1,9 @@
 /*
  * qvp: internal multi-core (AMP) Cortex-R SoC model
  *
- * Every core sees its own ITCM at 0x0, DTCM at 0x40000 and QCC at
- * 0x410000. The TCMs are also visible to everyone on the AXI bus.
+ * Every core sees its own ITCM at 0x0, DTCM at 0x40000, QCC at
+ * 0x410000 and console UART at 0xD12000. The TCMs are also visible to
+ * everyone on the AXI bus.
  * Everything else is a single global map shared by all cores.
  *
  * Each core lives in its own CPU cluster so that it is a separate
@@ -16,7 +17,8 @@
  * on one core (breakpoint, step, Ctrl-C) freezes only that core; the
  * rest of the SoC keeps running. Don't combine with -s/-gdb.
  * start-paused=on pauses every core before its first instruction.
- * Console: PL011 at 0xD12000 (GIC INTID 32) on -serial / -nographic.
+ * Console: each core has its own PL011 at 0xD12000 (GIC PPI, INTID 16),
+ * core n on the n-th -serial, so every core logs to its own terminal.
  * Monitor (also via gdb "monitor ..."):
  *   qvp-core start|hold|reset|pause|resume|status [core|all]
  *
@@ -62,14 +64,17 @@
 
 /*
  * UART: a PL011 stands in for elan_uart until its register spec is
- * modelled. It decodes the first 4K of the 8K window.
+ * modelled. It decodes the first 4K of the 8K window. Each core gets a
+ * private instance (like the multi-process setup, where every core had
+ * its own console) and its interrupt is a PPI, so it only ever reaches
+ * the owning core.
  */
 #define QVP_UART_BASE       0x00D12000
 #define QVP_UART_SIZE       0x2000
 #define QVP_PL011_SIZE      0x1000
 
-/* GIC SPI numbers (INTID = 32 + SPI); placeholders until the real map */
-#define QVP_SPI_UART        0
+/* GIC PPI numbers (INTID 16..31, banked per core) */
+#define QVP_PPI_UART        16
 
 /*
  * PMU stub. Placeholder core-control registers until the real
@@ -139,6 +144,7 @@ struct QVPMachineState {
     MemoryRegion itcm_local[QVP_NUM_CORES];
     MemoryRegion dtcm_local[QVP_NUM_CORES];
     MemoryRegion qcc[QVP_NUM_CORES];
+    PL011State uart[QVP_NUM_CORES];
     MemoryRegion global_ram[ARRAY_SIZE(qvp_global)];
     GICState gic;
     MemoryRegion pmu;
@@ -231,6 +237,23 @@ static void qvp_create_gic(QVPMachineState *s, MemoryRegion *sysmem)
         sysbus_connect_irq(sbd, i + QVP_NUM_CORES,
                            qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
     }
+}
+
+/* Core i's private console UART, on the i-th -serial */
+static void qvp_create_uart(QVPMachineState *s, int i)
+{
+    g_autofree char *name = g_strdup_printf("%s-uart", qvp_cores[i].name);
+    SysBusDevice *sbd;
+    int ppi_base = QVP_NUM_IRQ - GIC_INTERNAL + i * GIC_INTERNAL;
+
+    object_initialize_child(OBJECT(s), name, &s->uart[i], TYPE_PL011);
+    qdev_prop_set_chr(DEVICE(&s->uart[i]), "chardev", serial_hd(i));
+    sbd = SYS_BUS_DEVICE(&s->uart[i]);
+    sysbus_realize(sbd, &error_fatal);
+    memory_region_add_subregion(&s->cpu_mem[i], QVP_UART_BASE,
+                                sysbus_mmio_get_region(sbd, 0));
+    sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(DEVICE(&s->gic),
+                                                ppi_base + QVP_PPI_UART));
 }
 
 /* Core control, shared by the PMU stub and the monitor */
@@ -479,9 +502,9 @@ static void qvp_init(MachineState *ms)
 
     qvp_create_gic(s, sysmem);
 
-    pl011_create(QVP_UART_BASE,
-                 qdev_get_gpio_in(DEVICE(&s->gic), QVP_SPI_UART),
-                 serial_hd(0));
+    for (int i = 0; i < QVP_NUM_CORES; i++) {
+        qvp_create_uart(s, i);
+    }
     create_unimplemented_device("uart-hi", QVP_UART_BASE + QVP_PL011_SIZE,
                                 QVP_UART_SIZE - QVP_PL011_SIZE);
 
