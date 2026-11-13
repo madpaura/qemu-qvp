@@ -180,7 +180,10 @@
                 "qvp: console pf1",
                 "qvp: console fcore0"
             ],
-            "problemMatcher": []
+            "problemMatcher": [],
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
         },
         {
             "label": "qvp: run",
