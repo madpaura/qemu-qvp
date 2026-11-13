@@ -84,7 +84,7 @@ bool cpu_thread_is_idle(CPUState *cpu)
     if (cpu->stop || !cpu_work_list_empty(cpu)) {
         return false;
     }
-    if (cpu_is_stopped(cpu)) {
+    if (cpu_is_stopped(cpu) || qatomic_read(&cpu->frozen)) {
         return true;
     }
     if (!cpu->halted || cpu_has_work(cpu)) {
@@ -273,7 +273,7 @@ void cpu_interrupt(CPUState *cpu, int mask)
 
 bool cpu_can_run(const CPUState *cpu)
 {
-    if (cpu->stop) {
+    if (cpu->stop || qatomic_read(&cpu->frozen)) {
         return false;
     }
     if (cpu_is_stopped(cpu)) {
@@ -437,6 +437,30 @@ void cpus_kick_thread(CPUState *cpu)
 #else
     qemu_sem_post(&cpu->sem);
 #endif
+}
+
+static void do_cpu_freeze(CPUState *cpu, run_on_cpu_data data)
+{
+    qatomic_set(&cpu->frozen, true);
+}
+
+void cpu_freeze(CPUState *cpu)
+{
+    g_assert(bql_locked());
+
+    if (qemu_cpu_is_self(cpu)) {
+        qatomic_set(&cpu->frozen, true);
+        cpu_exit(cpu);
+        return;
+    }
+    /* Runs on @cpu's thread, so once it returns @cpu is out of the loop */
+    run_on_cpu(cpu, do_cpu_freeze, RUN_ON_CPU_NULL);
+}
+
+void cpu_thaw(CPUState *cpu)
+{
+    qatomic_set(&cpu->frozen, false);
+    qemu_cpu_kick(cpu);
 }
 
 void qemu_cpu_kick(CPUState *cpu)
