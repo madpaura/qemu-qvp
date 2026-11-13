@@ -42,8 +42,8 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp console",
-                    "endsPattern": "^qvp console"
+                    "beginsPattern": "^__qvp_never__$",
+                    "endsPattern": "^qvp console \\S+: waiting for qvp"
                 }
             },
             "presentation": {
@@ -67,8 +67,8 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp console",
-                    "endsPattern": "^qvp console"
+                    "beginsPattern": "^__qvp_never__$",
+                    "endsPattern": "^qvp console \\S+: waiting for qvp"
                 }
             },
             "presentation": {
@@ -92,8 +92,8 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp console",
-                    "endsPattern": "^qvp console"
+                    "beginsPattern": "^__qvp_never__$",
+                    "endsPattern": "^qvp console \\S+: waiting for qvp"
                 }
             },
             "presentation": {
@@ -117,8 +117,8 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp console",
-                    "endsPattern": "^qvp console"
+                    "beginsPattern": "^__qvp_never__$",
+                    "endsPattern": "^qvp console \\S+: waiting for qvp"
                 }
             },
             "presentation": {
@@ -142,8 +142,8 @@
                 },
                 "background": {
                     "activeBegins": true,
-                    "beginsPattern": "^qvp console",
-                    "endsPattern": "^qvp console"
+                    "beginsPattern": "^__qvp_never__$",
+                    "endsPattern": "^qvp console \\S+: waiting for qvp"
                 }
             },
             "presentation": {
