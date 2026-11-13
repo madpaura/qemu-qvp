@@ -1,0 +1,125 @@
+{
+    "//": "qvp board: one Cortex-Debug session per core, each on its own per-core gdb server (port 6234 + core). 'qvp: debug all cores' starts QEMU with every core paused at reset; the single-core entries attach to an already running qvp/run.sh --gdb.",
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "qvp: aux (core 0)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:6234",
+            "gdbPath": "gdb-multiarch",
+            "toolchainPrefix": "arm-none-eabi",
+            "executable": "${workspaceFolder}/qvp/fw/build/core0.elf",
+            "cwd": "${workspaceFolder}/qvp/fw",
+            "overrideAttachCommands": [],
+            "overrideResetCommands": [
+                "monitor qvp-core reset aux",
+                "maintenance flush register-cache"
+            ],
+            "overrideRestartCommands": [
+                "monitor qvp-core reset aux",
+                "maintenance flush register-cache"
+            ],
+            "showDevDebugOutput": "none"
+        },
+        {
+            "name": "qvp: mgmt (core 1)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:6235",
+            "gdbPath": "gdb-multiarch",
+            "toolchainPrefix": "arm-none-eabi",
+            "executable": "${workspaceFolder}/qvp/fw/build/core1.elf",
+            "cwd": "${workspaceFolder}/qvp/fw",
+            "overrideAttachCommands": [],
+            "overrideResetCommands": [
+                "monitor qvp-core reset mgmt",
+                "maintenance flush register-cache"
+            ],
+            "overrideRestartCommands": [
+                "monitor qvp-core reset mgmt",
+                "maintenance flush register-cache"
+            ],
+            "showDevDebugOutput": "none"
+        },
+        {
+            "name": "qvp: pf0 (core 2)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:6236",
+            "gdbPath": "gdb-multiarch",
+            "toolchainPrefix": "arm-none-eabi",
+            "executable": "${workspaceFolder}/qvp/fw/build/core2.elf",
+            "cwd": "${workspaceFolder}/qvp/fw",
+            "overrideAttachCommands": [],
+            "overrideResetCommands": [
+                "monitor qvp-core reset pf0",
+                "maintenance flush register-cache"
+            ],
+            "overrideRestartCommands": [
+                "monitor qvp-core reset pf0",
+                "maintenance flush register-cache"
+            ],
+            "showDevDebugOutput": "none"
+        },
+        {
+            "name": "qvp: pf1 (core 3)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:6237",
+            "gdbPath": "gdb-multiarch",
+            "toolchainPrefix": "arm-none-eabi",
+            "executable": "${workspaceFolder}/qvp/fw/build/core3.elf",
+            "cwd": "${workspaceFolder}/qvp/fw",
+            "overrideAttachCommands": [],
+            "overrideResetCommands": [
+                "monitor qvp-core reset pf1",
+                "maintenance flush register-cache"
+            ],
+            "overrideRestartCommands": [
+                "monitor qvp-core reset pf1",
+                "maintenance flush register-cache"
+            ],
+            "showDevDebugOutput": "none"
+        },
+        {
+            "name": "qvp: fcore0 (core 4)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "servertype": "external",
+            "gdbTarget": "127.0.0.1:6238",
+            "gdbPath": "gdb-multiarch",
+            "toolchainPrefix": "arm-none-eabi",
+            "executable": "${workspaceFolder}/qvp/fw/build/core4.elf",
+            "cwd": "${workspaceFolder}/qvp/fw",
+            "overrideAttachCommands": [],
+            "overrideResetCommands": [
+                "monitor qvp-core reset fcore0",
+                "maintenance flush register-cache"
+            ],
+            "overrideRestartCommands": [
+                "monitor qvp-core reset fcore0",
+                "maintenance flush register-cache"
+            ],
+            "showDevDebugOutput": "none"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "qvp: debug all cores",
+            "configurations": [
+                "qvp: aux (core 0)",
+                "qvp: mgmt (core 1)",
+                "qvp: pf0 (core 2)",
+                "qvp: pf1 (core 3)",
+                "qvp: fcore0 (core 4)"
+            ],
+            "preLaunchTask": "qvp: run (gdb, paused)",
+            "stopAll": true
+        }
+    ]
+}

@@ -1,0 +1,114 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "qvp: build qemu",
+            "type": "shell",
+            "command": "ninja -C build qemu-system-arm",
+            "group": "build",
+            "problemMatcher": {
+                "base": "$gcc",
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}/build"
+                ]
+            }
+        },
+        {
+            "label": "qvp: build fw",
+            "type": "shell",
+            "command": "make -C qvp/fw",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": {
+                "base": "$gcc",
+                "fileLocation": [
+                    "relative",
+                    "${workspaceFolder}/qvp/fw"
+                ]
+            }
+        },
+        {
+            "label": "qvp: run",
+            "type": "shell",
+            "command": "qvp/run.sh --gdb",
+            "dependsOn": [
+                "qvp: build qemu",
+                "qvp: build fw"
+            ],
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp: monitor on",
+                    "endsPattern": "\\(fcore0\\) gdb server on port"
+                }
+            },
+            "presentation": {
+                "panel": "dedicated",
+                "focus": true,
+                "clear": true
+            }
+        },
+        {
+            "label": "qvp: run (gdb, paused)",
+            "type": "shell",
+            "command": "qvp/run.sh --gdb --paused",
+            "dependsOn": [
+                "qvp: build qemu",
+                "qvp: build fw"
+            ],
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "qvp",
+                "pattern": {
+                    "regexp": "^__qvp_no_problems__$"
+                },
+                "background": {
+                    "activeBegins": true,
+                    "beginsPattern": "^qvp: monitor on",
+                    "endsPattern": "\\(fcore0\\) gdb server on port"
+                }
+            },
+            "presentation": {
+                "panel": "dedicated",
+                "focus": true,
+                "clear": true
+            }
+        },
+        {
+            "label": "qvp: monitor",
+            "type": "shell",
+            "command": "socat -,raw,echo=0 unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "problemMatcher": [],
+            "presentation": {
+                "panel": "dedicated",
+                "focus": true
+            }
+        },
+        {
+            "label": "qvp: status",
+            "type": "shell",
+            "command": "echo 'qvp-core status' | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock | tr -d '\\r' | grep '^  core'",
+            "problemMatcher": []
+        },
+        {
+            "label": "qvp: resume all cores",
+            "type": "shell",
+            "command": "echo 'qvp-core resume all' | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "problemMatcher": []
+        },
+        {
+            "label": "qvp: stop",
+            "type": "shell",
+            "command": "echo quit | socat - unix-connect:/tmp/qvp-${env:USER}-monitor.sock",
+            "problemMatcher": []
+        }
+    ]
+}
