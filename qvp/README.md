@@ -55,12 +55,16 @@ A breakpoint, step or Ctrl-C in one core's gdb stops only that core.
 
 ## VS Code (Cortex-Debug extension)
 
-- **qvp: debug all cores**: builds, opens the five console terminals (one
-  split terminal group), starts QEMU with all cores paused and attaches
-  one debug session per core. Continue each core from its own
-  session (cores you don't continue stay paused).
+- **qvp: consoles**: opens the five console terminals (one split group).
+  Run it once; the consoles stay open and reconnect on every run.
+- **qvp: debug all cores**: builds, starts QEMU with all cores paused and
+  attaches one debug session per core. Continue each core from its own
+  session (cores you don't continue stay paused). It doesn't wait for the
+  consoles (nothing runs until you continue a core), so open them before
+  or after.
 - **qvp: \<core\>**: attach to one core of an already running
   `qvp/run.sh --gdb`.
+- **qvp: run** (task) waits for the five consoles like `qvp/run.sh`.
 - Tasks: `qvp: consoles` (or `qvp: console <core>`), `qvp: run`,
   `qvp: monitor`, `qvp: status`, `qvp: resume all cores`, `qvp: stop`.
 

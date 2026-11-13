@@ -48,6 +48,7 @@ all)
 esac
 
 sock=$RUNDIR/$name.sock
+mkdir -p "$RUNDIR"
 
 # Pass keystrokes through one by one; the firmware does the echo
 if [ -t 0 ]; then
@@ -58,9 +59,19 @@ if [ -t 0 ]; then
 fi
 
 echo "qvp console $name: waiting for qvp on $sock"
+err=$RUNDIR/.$name.console.err
+last=
 while :; do
-    if socat - UNIX-CONNECT:"$sock" 2>/dev/null; then
+    if socat - UNIX-CONNECT:"$sock" 2>"$err"; then
         printf '\n--- qvp console %s: disconnected, waiting ---\n' "$name"
+        last=
+    elif ! grep -qE "No such file|Connection refused" "$err"; then
+        # not just "qvp isn't running yet": show it (once)
+        msg=$(cat "$err")
+        if [ "$msg" != "$last" ]; then
+            printf '%s\n' "$msg"
+            last=$msg
+        fi
     fi
     sleep 0.2
 done

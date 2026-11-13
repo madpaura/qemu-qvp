@@ -55,7 +55,8 @@ done
 
 echo "qvp: consoles and logs in $RUNDIR, monitor on $RUNDIR/monitor.sock" >&2
 if [ $WAIT = on ]; then
-    echo "qvp: waiting for the consoles (qvp/console.sh all)" >&2
+    echo "qvp: waiting for the consoles (qvp/console.sh all, or the" \
+         "\"qvp: consoles\" task in VS Code)" >&2
 fi
 # shellcheck disable=SC2086
 exec "$QEMU" -M "$MACHINE" -accel tcg,thread=multi -display none \

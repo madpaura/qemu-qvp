@@ -7,11 +7,19 @@
             "command": "ninja -C build qemu-system-arm",
             "group": "build",
             "problemMatcher": {
-                "base": "$gcc",
+                "owner": "gcc",
                 "fileLocation": [
                     "relative",
                     "${workspaceFolder}/build"
-                ]
+                ],
+                "pattern": {
+                    "regexp": "^(.*?):(\\d+):(\\d*):?\\s+(?:fatal\\s+)?(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
             }
         },
         {
@@ -23,11 +31,19 @@
                 "isDefault": true
             },
             "problemMatcher": {
-                "base": "$gcc",
+                "owner": "gcc",
                 "fileLocation": [
                     "relative",
                     "${workspaceFolder}/qvp/fw"
-                ]
+                ],
+                "pattern": {
+                    "regexp": "^(.*?):(\\d+):(\\d*):?\\s+(?:fatal\\s+)?(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
             }
         },
         {
@@ -172,8 +188,7 @@
             "command": "qvp/run.sh --gdb",
             "dependsOn": [
                 "qvp: build qemu",
-                "qvp: build fw",
-                "qvp: consoles"
+                "qvp: build fw"
             ],
             "isBackground": true,
             "problemMatcher": {
@@ -196,11 +211,10 @@
         {
             "label": "qvp: run (gdb, paused)",
             "type": "shell",
-            "command": "qvp/run.sh --gdb --paused",
+            "command": "qvp/run.sh --gdb --paused --no-wait",
             "dependsOn": [
                 "qvp: build qemu",
-                "qvp: build fw",
-                "qvp: consoles"
+                "qvp: build fw"
             ],
             "isBackground": true,
             "problemMatcher": {
