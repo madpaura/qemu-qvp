@@ -58,20 +58,41 @@ if [ -t 0 ]; then
     stty -icanon -echo
 fi
 
-echo "qvp console $name: waiting for qvp on $sock"
-err=$RUNDIR/.$name.console.err
-last=
-while :; do
-    if socat - UNIX-CONNECT:"$sock" 2>"$err"; then
-        printf '\n--- qvp console %s: disconnected, waiting ---\n' "$name"
-        last=
-    elif ! grep -qE "No such file|Connection refused" "$err"; then
-        # not just "qvp isn't running yet": show it (once)
-        msg=$(cat "$err")
-        if [ "$msg" != "$last" ]; then
-            printf '%s\n' "$msg"
-            last=$msg
+# One connection attempt. socat's output goes to the terminal; its log
+# (-d -d) goes through the loop below, which reports connect/disconnect
+# and any error other than "qvp isn't running yet" (once, via $last).
+session() {
+    { socat -d -d - UNIX-CONNECT:"$sock" 2>&1 >&3 3>&-; } |
+    {
+        connected=
+        while IFS= read -r line; do
+            case $line in
+            *" N successfully connected"*)
+                printf -- '--- qvp console %s: connected ---\n' "$name"
+                connected=1
+                : > "$last"
+                ;;
+            *"No such file"* | *"Connection refused"*)
+                ;;
+            *" E "*)
+                msg="qvp console $name: ${line#* E }"
+                if [ "$msg" != "$(cat "$last")" ]; then
+                    printf '%s\n' "$msg"
+                    printf '%s' "$msg" > "$last"
+                fi
+                ;;
+            esac
+        done
+        if [ -n "$connected" ]; then
+            printf -- '\n--- qvp console %s: disconnected, waiting ---\n' "$name"
         fi
-    fi
+    }
+} 3>&1
+
+last=$RUNDIR/.$name.console.err
+: > "$last"
+echo "qvp console $name: waiting for qvp on $sock"
+while :; do
+    session
     sleep 0.2
 done
